@@ -8,8 +8,7 @@ and autocompletes VM names.
 ```shell
 # Setup gcloud:
 gcloud auth login
-gcloud config set compute/zone foo
-gcloud config set project bar
+gcloud config set project foo
 
 # Install gssh:
 go install github.com/corverroos/gssh
@@ -17,7 +16,7 @@ go install github.com/corverroos/gssh
 # If `which gssh` fails, then fix your environment: `export PATH=$PATH:$(go env GOPATH)/bin`. Or see https://go.dev/doc/gopath_code
 
 # Setup ssh user via GSSH_USER env var:
-echo "GSSH_USER=baz" >> ~/.bashrc
+echo "GSSH_USER=bar" >> ~/.bashrc
 ```
 
 ## Usage

@@ -5,14 +5,13 @@
 //
 //	# Setup gcloud:
 //	gcloud auth login
-//	gcloud config set compute/zone `foo`
-//	gcloud config set project `bar`
+//	gcloud config set project `foo`
 //
 //	# Install gssh:
 //	go install github.com/corverroos/gssh
 //
 //	# Setup ssh user via GSSH_USER env var:
-//	echo "GSSH_USER=baz" >> ~/.bashrc
+//	echo "GSSH_USER=bar" >> ~/.bashrc
 //
 //	# SSH by selecting one of all VMs:
 //	gssh
@@ -32,6 +31,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -60,12 +60,7 @@ func run(vmFilter string, user string) error {
 		return err
 	}
 
-	zone, err := getConfig("compute/zone")
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Using config: project=%q, compute/zone=%q, user=%q\n", project, zone, user)
+	fmt.Printf("Defaults: project=%q, user=%q\n", project, user)
 
 	output, err := exec.Command("gcloud", "compute", "instances", "list", "--format=json").CombinedOutput()
 	if err != nil {
@@ -83,18 +78,22 @@ func run(vmFilter string, user string) error {
 		if !strings.HasPrefix(instance.Name, vmFilter) {
 			continue
 		}
+
+		label := fmt.Sprintf("%-40s%s", instance.Name, instance.TrimZone())
+	
 		if vmFilter == instance.Name {
-			vms = []string{instance.Name}
+			vms = []string{label}
 			break
 		}
-		vms = append(vms, instance.Name)
+
+		vms = append(vms, label)
 	}
 
-	var vm string
+	var idx int
 	if len(vms) == 0 {
 		return fmt.Errorf("no VMs found")
 	} else if len(vms) == 1 {
-		vm = vms[0]
+		idx = 0
 	} else {
 		selector := promptui.Select{
 			Label: "Select VM",
@@ -102,22 +101,23 @@ func run(vmFilter string, user string) error {
 			Size:  len(vms),
 		}
 
-		_, vm, err = selector.Run()
+		idx, _, err = selector.Run()
 		if err != nil {
 			return fmt.Errorf("selector error: %w", err)
 		}
 	}
 
-	fmt.Println("Selected VM: " + vm)
-
-	host := vm
+	zone := instances[idx].TrimZone()
+	host := instances[idx].Name
+	fmt.Printf("Selected VM: %s (zone=%s)\n", host, zone)
 	if user != "" {
-		host = user + "@" + vm
+		host = user + "@" + host
 	}
 
-	fmt.Printf("Executing: gcloud compute ssh %s\n\n", host)
+	cmds := []string{"gcloud", "compute", "ssh", fmt.Sprintf("--zone=%s", zone), host}
+	fmt.Printf("Executing: %s\n\n", strings.Join(cmds, " "))
 
-	c := exec.Command("gcloud", "compute", "ssh", host)
+	c := exec.Command(cmds[0], cmds[1:]...)
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
@@ -126,6 +126,11 @@ func run(vmFilter string, user string) error {
 
 type instance struct {
 	Name string
+	Zone string
+}
+
+func (i instance) TrimZone() string {
+	return filepath.Base(i.Zone)
 }
 
 func getConfig(name string) (string, error) {

@@ -31,7 +31,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -50,7 +52,7 @@ func main() {
 
 	err := run(vmFilter, user)
 	if err != nil {
-		slog.Error("Fatal error: %s", err)
+		slog.Error("Fatal error", "err", err)
 	}
 }
 
@@ -73,43 +75,67 @@ func run(vmFilter string, user string) error {
 		return fmt.Errorf("unmarshal instances error: %w", err)
 	}
 
-	var vms []string
-	for _, instance := range instances {
-		if !strings.HasPrefix(instance.Name, vmFilter) {
+	var prev string
+	if conf, err := loadConfig(); err == nil {
+		prev = conf.Previous
+	}
+
+	var (
+		labels     []string
+		cursor     int
+		selectable []instance
+	)
+	for _, inst := range sortInstances(instances) {
+		if !strings.HasPrefix(inst.Name, vmFilter) {
 			continue
 		}
 
-		label := fmt.Sprintf("%-40s%s", instance.Name, instance.TrimZone())
-	
-		if vmFilter == instance.Name {
-			vms = []string{label}
+		label := fmt.Sprintf("%-40s%s", inst.Name, inst.TrimZone())
+
+		if vmFilter == inst.Name {
+			labels = []string{label}
+			selectable = []instance{inst}
 			break
 		}
 
-		vms = append(vms, label)
+		labels = append(labels, label)
+		selectable = append(selectable, inst)
+
+		if inst.Name == prev {
+			cursor = len(selectable) - 1
+		}
 	}
 
-	var idx int
-	if len(vms) == 0 {
-		return fmt.Errorf("no VMs found")
-	} else if len(vms) == 1 {
-		idx = 0
+	var selected int
+	if len(selectable) == 0 {
+		msg := "no VMs found"
+		if vmFilter != "" {
+			msg += fmt.Sprintf(" for filter '%s'", vmFilter)
+		}
+		return fmt.Errorf(msg)
+	} else if len(labels) == 1 {
+		selected = 0
 	} else {
 		selector := promptui.Select{
 			Label: "Select VM",
-			Items: vms,
-			Size:  len(vms),
+			Items: labels,
+			Size:  len(labels),
 		}
 
-		idx, _, err = selector.Run()
+		selected, _, err = selector.RunCursorAt(cursor, 0)
 		if err != nil {
 			return fmt.Errorf("selector error: %w", err)
 		}
 	}
 
-	zone := instances[idx].TrimZone()
-	host := instances[idx].Name
+	zone := selectable[selected].TrimZone()
+	host := selectable[selected].Name
 	fmt.Printf("Selected VM: %s (zone=%s)\n", host, zone)
+
+	if err = storeConfig(config{Previous: host}); err != nil {
+		slog.Debug("Failed to store config", "err", err)
+	}
+
 	if user != "" {
 		host = user + "@" + host
 	}
@@ -122,6 +148,15 @@ func run(vmFilter string, user string) error {
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c.Run()
+}
+
+// sortInstances sorts instances by name.
+func sortInstances(instances []instance) []instance {
+	sort.Slice(instances, func(i, j int) bool {
+		return instances[i].Name < instances[j].Name
+	})
+
+	return instances
 }
 
 type instance struct {
@@ -140,4 +175,58 @@ func getConfig(name string) (string, error) {
 	}
 
 	return strings.TrimSpace(string(output)), nil
+}
+
+func loadConfig() (config, error) {
+	filename, ok := configPath()
+	if !ok {
+		return config{}, fmt.Errorf("HOME env var not present, cannot read config")
+	}
+
+	b, err := os.ReadFile(filename)
+	if os.IsNotExist(err) {
+		return config{}, nil
+	} else if err != nil {
+		return config{}, fmt.Errorf("read config error: %w", err)
+	}
+
+	var conf config
+	err = json.Unmarshal(b, &conf)
+	if err != nil {
+		return config{}, fmt.Errorf("unmarshal config error: %w", err)
+	}
+
+	return conf, nil
+}
+
+func storeConfig(conf config) error {
+	b, err := json.MarshalIndent(conf, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config error: %w", err)
+	}
+
+	filename, ok := configPath()
+	if !ok {
+		return fmt.Errorf("HOME env var not present, cannot store config")
+	}
+
+	err = os.WriteFile(filename, b, 0666)
+	if err != nil {
+		return fmt.Errorf("write config error: %w", err)
+	}
+
+	return nil
+}
+
+func configPath() (string, bool) {
+	home, ok := os.LookupEnv("HOME")
+	if !ok {
+		return "", false
+	}
+
+	return path.Join(home, ".gssh.json"), true
+}
+
+type config struct {
+	Previous string `json:"previous"`
 }

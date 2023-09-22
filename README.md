@@ -25,9 +25,15 @@ echo "GSSH_USER=bar" >> ~/.bashrc
 # SSH by selecting one of all VMs:
 gssh
 
-# SSH by selecting one of any VMs that start with "foo":
+# SSH by selecting one of any VMs that start with 'foo', ie. "^foo.*":
 gssh foo
 
-# SSH to a specific VM:
+# SSH to a specific 'foo-bar' VM:
 gssh foo-bar
+
+# SSH to previously selected VM:
+gssh -p
+
+# SSH using gcloud default user:
+gssh -u=""
 ``````

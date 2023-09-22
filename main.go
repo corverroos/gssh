@@ -1,26 +1,5 @@
 // Command gssh is a wrapper around `gcloud compute ssh` that autocompletes VM names
 // and allows for a non-default ssh-username.
-//
-// Usage:
-//
-//	# Setup gcloud:
-//	gcloud auth login
-//	gcloud config set project `foo`
-//
-//	# Install gssh:
-//	go install github.com/corverroos/gssh
-//
-//	# Setup ssh user via GSSH_USER env var:
-//	echo "GSSH_USER=bar" >> ~/.bashrc
-//
-//	# SSH by selecting one of all VMs:
-//	gssh
-//
-//	# SSH by selecting one of all VMs that start with `foo`:
-//	gssh foo
-//
-//	# SSH to a specific VM:
-//	gssh foo-bar
 package main
 
 import (
@@ -37,12 +16,30 @@ import (
 	"strings"
 )
 
+const noUserFlag = " "
+
+var (
+	flagUser = flag.String("u", noUserFlag, "ssh username (overrides $GSSH_USER env var)")
+	flagPrev = flag.Bool("p", false, "use previously selected VM (if any) as filter")
+)
+
 func main() {
+	flag.Usage = func() {
+		o := flag.CommandLine.Output()
+		fmt.Fprint(o, "gssh is a wrapper around `gcloud compute ssh` that autocompletes VM names\n")
+		fmt.Fprint(o, "\n")
+		fmt.Fprintf(o, "Usage: %s [-p] [-u=root] [filter]\n", os.Args[0])
+		fmt.Fprint(o, "\n")
+		fmt.Fprint(o, "[filter] is a prefix of VM names to filter by\n")
+		fmt.Fprint(o, "\n")
+		fmt.Fprint(o, "  Flags\n")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	var vmFilter string
-	if len(os.Args) > 1 {
-		vmFilter = os.Args[1]
+	if len(flag.Args()) > 0 {
+		vmFilter = strings.TrimSpace(flag.Args()[0])
 	}
 
 	var user string
@@ -50,89 +47,72 @@ func main() {
 		user = u
 	}
 
-	err := run(vmFilter, user)
+	if *flagUser != noUserFlag {
+		user = *flagUser
+	}
+
+	err := run(vmFilter, user, *flagPrev)
 	if err != nil {
 		slog.Error("Fatal error", "err", err)
 	}
 }
 
-func run(vmFilter string, user string) error {
-	project, err := getConfig("project")
+// run executes the gssh command.
+func run(vmFilter string, user string, usePrev bool) error {
+	project, err := getGcloudConfig("project")
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Defaults: project=%q, user=%q\n", project, user)
+	fmt.Printf("Using: project=%q, user=%q, filter=%q, prev=%v\n", project, user, vmFilter, usePrev)
 
-	output, err := exec.Command("gcloud", "compute", "instances", "list", "--format=json").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("gcloud compute instances list error: %w, %s", err, output)
+	var prev instance
+	if conf, err := loadConfig(); err == nil {
+		prev = conf.Previous
+	} else if usePrev {
+		return fmt.Errorf("cannot connect to previous VM, load config error: %w", err)
 	}
 
 	var instances []instance
-	err = json.Unmarshal(output, &instances)
-	if err != nil {
-		return fmt.Errorf("unmarshal instances error: %w", err)
-	}
-
-	var prev string
-	if conf, err := loadConfig(); err == nil {
-		prev = conf.Previous
-	}
-
-	var (
-		labels     []string
-		cursor     int
-		selectable []instance
-	)
-	for _, inst := range sortInstances(instances) {
-		if !strings.HasPrefix(inst.Name, vmFilter) {
-			continue
+	if usePrev {
+		instances = []instance{prev}
+	} else {
+		output, err := exec.Command("gcloud", "compute", "instances", "list", "--format=json").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("gcloud compute instances list error: %w, %s", err, output)
 		}
 
-		label := fmt.Sprintf("%-40s%s", inst.Name, inst.TrimZone())
-
-		if vmFilter == inst.Name {
-			labels = []string{label}
-			selectable = []instance{inst}
-			break
+		err = json.Unmarshal(output, &instances)
+		if err != nil {
+			return fmt.Errorf("unmarshal instances error: %w", err)
 		}
 
-		labels = append(labels, label)
-		selectable = append(selectable, inst)
-
-		if inst.Name == prev {
-			cursor = len(selectable) - 1
-		}
+		instances = sortInstances(instances)
 	}
 
-	var selected int
-	if len(selectable) == 0 {
+	instances = filterInstances(instances, vmFilter)
+
+	if len(instances) == 0 {
 		msg := "no VMs found"
 		if vmFilter != "" {
 			msg += fmt.Sprintf(" for filter '%s'", vmFilter)
 		}
 		return fmt.Errorf(msg)
-	} else if len(labels) == 1 {
-		selected = 0
-	} else {
-		selector := promptui.Select{
-			Label: "Select VM",
-			Items: labels,
-			Size:  len(labels),
-		}
+	}
 
-		selected, _, err = selector.RunCursorAt(cursor, 0)
+	selected := instances[0]
+	if len(instances) > 1 {
+		selected, err = selectInstance(instances, prev)
 		if err != nil {
-			return fmt.Errorf("selector error: %w", err)
+			return fmt.Errorf("select instance error: %w", err)
 		}
 	}
 
-	zone := selectable[selected].TrimZone()
-	host := selectable[selected].Name
+	zone := selected.TrimZone()
+	host := selected.Name
 	fmt.Printf("Selected VM: %s (zone=%s)\n", host, zone)
 
-	if err = storeConfig(config{Previous: host}); err != nil {
+	if err = storeConfig(config{Previous: selected}); err != nil {
 		slog.Debug("Failed to store config", "err", err)
 	}
 
@@ -150,6 +130,51 @@ func run(vmFilter string, user string) error {
 	return c.Run()
 }
 
+// selectInstance prompts the user to select one of the given instances,
+// preselecting the previous instance if possible.
+func selectInstance(instances []instance, prev instance) (instance, error) {
+	var labels []string
+	var cursor int
+	for i, inst := range instances {
+		label := fmt.Sprintf("%-40s%s", inst.Name, inst.TrimZone())
+
+		labels = append(labels, label)
+
+		if inst.Name == prev.Name {
+			cursor = i
+		}
+	}
+
+	selector := promptui.Select{
+		Label: "Select VM",
+		Items: labels,
+		Size:  len(labels),
+	}
+
+	idx, _, err := selector.RunCursorAt(cursor, 0)
+	if err != nil {
+		return instance{}, fmt.Errorf("selector error: %w", err)
+	}
+
+	return instances[idx], nil
+}
+
+// filterInstances filters instances by name prefix.
+func filterInstances(instances []instance, prefix string) []instance {
+	if prefix == "" {
+		return instances
+	}
+
+	var filtered []instance
+	for _, inst := range instances {
+		if strings.HasPrefix(inst.Name, prefix) {
+			filtered = append(filtered, inst)
+		}
+	}
+
+	return filtered
+}
+
 // sortInstances sorts instances by name.
 func sortInstances(instances []instance) []instance {
 	sort.Slice(instances, func(i, j int) bool {
@@ -159,6 +184,7 @@ func sortInstances(instances []instance) []instance {
 	return instances
 }
 
+// instance is a gcloud compute instance.
 type instance struct {
 	Name string
 	Zone string
@@ -168,7 +194,8 @@ func (i instance) TrimZone() string {
 	return filepath.Base(i.Zone)
 }
 
-func getConfig(name string) (string, error) {
+// getGcloudConfig returns the value of a gcloud config property.
+func getGcloudConfig(name string) (string, error) {
 	output, err := exec.Command("gcloud", "config", "get", name).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("gcloud config get %s error: %w, %s", name, err, output)
@@ -177,6 +204,7 @@ func getConfig(name string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
+// loadConfig loads the gssh config file.
 func loadConfig() (config, error) {
 	filename, ok := configPath()
 	if !ok {
@@ -199,6 +227,7 @@ func loadConfig() (config, error) {
 	return conf, nil
 }
 
+// storeConfig stores the gssh config file.
 func storeConfig(conf config) error {
 	b, err := json.MarshalIndent(conf, "", "  ")
 	if err != nil {
@@ -218,6 +247,8 @@ func storeConfig(conf config) error {
 	return nil
 }
 
+// configPath returns true and the path to the gssh config file or false if
+// the HOME env var is not present.
 func configPath() (string, bool) {
 	home, ok := os.LookupEnv("HOME")
 	if !ok {
@@ -227,6 +258,7 @@ func configPath() (string, bool) {
 	return path.Join(home, ".gssh.json"), true
 }
 
+// config is the gssh config file format.
 type config struct {
-	Previous string `json:"previous"`
+	Previous instance `json:"previous"`
 }

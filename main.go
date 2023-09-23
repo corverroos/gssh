@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -19,52 +20,61 @@ import (
 const noUserFlag = " "
 
 var (
-	flagUser = flag.String("u", noUserFlag, "ssh username (overrides $GSSH_USER env var)")
-	flagPrev = flag.Bool("p", false, "use previously selected VM (if any) as filter")
+	flagUser   = flag.String("u", noUserFlag, "ssh username (overrides $GSSH_USER env var)")
+	flagFilter = flag.String("f", "", "regex filter VMs by name")
+	flagHost   = flag.String("h", "", "specific VM host name (alias for -f '^host$')")
+	flagPrev   = flag.Bool("p", false, "use previously selected VM (if any) as filter")
 )
 
 func main() {
+	o := flag.CommandLine.Output()
 	flag.Usage = func() {
-		o := flag.CommandLine.Output()
 		fmt.Fprint(o, "gssh is a wrapper around `gcloud compute ssh` that autocompletes VM names\n")
 		fmt.Fprint(o, "\n")
-		fmt.Fprintf(o, "Usage: %s [-p] [-u=root] [filter]\n", os.Args[0])
+		fmt.Fprint(o, "Usage: gssh [-h host] [-f filter_regex] [-p] [-u user] [ssh_args ...]\n")
 		fmt.Fprint(o, "\n")
-		fmt.Fprint(o, "[filter] is a prefix of VM names to filter by\n")
+		fmt.Fprint(o, "Arguments:\n")
+		fmt.Fprint(o, "  ssh_args\tFlags and positionals passed to the underlying ssh implementation.\n")
 		fmt.Fprint(o, "\n")
-		fmt.Fprint(o, "  Flags\n")
+		fmt.Fprint(o, "Flags:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
-
-	var vmFilter string
-	if len(flag.Args()) > 0 {
-		vmFilter = strings.TrimSpace(flag.Args()[0])
-	}
 
 	var user string
 	if u, ok := os.LookupEnv("GSSH_USER"); ok {
 		user = u
 	}
-
 	if *flagUser != noUserFlag {
 		user = *flagUser
 	}
 
-	err := run(vmFilter, user, *flagPrev)
+	err := run(*flagHost, *flagFilter, user, *flagPrev, flag.Args())
 	if err != nil {
-		slog.Error("Fatal error", "err", err)
+		fmt.Fprintf(o, "Fatal error: %v", err)
+		os.Exit(1)
 	}
 }
 
 // run executes the gssh command.
-func run(vmFilter string, user string, usePrev bool) error {
+func run(hostname string, filter string, user string, usePrev bool, args []string) error {
+	if hostname != "" && filter != "" {
+		return fmt.Errorf("cannot use both -h and -f flags")
+	} else if hostname != "" {
+		filter = fmt.Sprintf("^%s$", hostname)
+	}
+
+	filterExp, err := regexp.Compile(filter)
+	if err != nil {
+		return fmt.Errorf("invalid filter regex: %w", err)
+	}
+
 	project, err := getGcloudConfig("project")
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Using: project=%q, user=%q, filter=%q, prev=%v\n", project, user, vmFilter, usePrev)
+	fmt.Printf("Using: project=%q, user=%q, filter=%q, prev=%v len(args)=%d\n", project, user, filter, usePrev, len(args))
 
 	var prev instance
 	if conf, err := loadConfig(); err == nil {
@@ -90,18 +100,22 @@ func run(vmFilter string, user string, usePrev bool) error {
 		instances = sortInstances(instances)
 	}
 
-	instances = filterInstances(instances, vmFilter)
+	instances = filterInstances(instances, filterExp)
 
 	if len(instances) == 0 {
 		msg := "no VMs found"
-		if vmFilter != "" {
-			msg += fmt.Sprintf(" for filter '%s'", vmFilter)
+		if filter != "" {
+			msg += fmt.Sprintf(" for filter '%s'", filter)
 		}
 		return fmt.Errorf(msg)
 	}
 
 	selected := instances[0]
 	if len(instances) > 1 {
+		if hostname != "" {
+			return fmt.Errorf("multiple VMs found for hostname %q", hostname)
+		}
+
 		selected, err = selectInstance(instances, prev)
 		if err != nil {
 			return fmt.Errorf("select instance error: %w", err)
@@ -122,6 +136,10 @@ func run(vmFilter string, user string, usePrev bool) error {
 
 	cmds := []string{"gcloud", "compute", "ssh", fmt.Sprintf("--zone=%s", zone), host}
 	fmt.Printf("Executing: %s\n\n", strings.Join(cmds, " "))
+
+	if len(args) > 0 {
+		cmds = append(cmds, "--", strings.Join(args, " "))
+	}
 
 	c := exec.Command(cmds[0], cmds[1:]...)
 	c.Stdin = os.Stdin
@@ -159,15 +177,15 @@ func selectInstance(instances []instance, prev instance) (instance, error) {
 	return instances[idx], nil
 }
 
-// filterInstances filters instances by name prefix.
-func filterInstances(instances []instance, prefix string) []instance {
-	if prefix == "" {
+// filterInstances filters instances by name regex.
+func filterInstances(instances []instance, regex *regexp.Regexp) []instance {
+	if regex.String() == "" {
 		return instances
 	}
 
 	var filtered []instance
 	for _, inst := range instances {
-		if strings.HasPrefix(inst.Name, prefix) {
+		if regex.MatchString(inst.Name) {
 			filtered = append(filtered, inst)
 		}
 	}

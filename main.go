@@ -135,11 +135,11 @@ func run(hostname string, filter string, user string, usePrev bool, args []strin
 	}
 
 	cmds := []string{"gcloud", "compute", "ssh", fmt.Sprintf("--zone=%s", zone), host}
-	fmt.Printf("Executing: %s\n\n", strings.Join(cmds, " "))
-
 	if len(args) > 0 {
 		cmds = append(cmds, "--", strings.Join(args, " "))
 	}
+
+	fmt.Printf("Executing: %s\n\n", strings.Join(cmds, " "))
 
 	c := exec.Command(cmds[0], cmds[1:]...)
 	c.Stdin = os.Stdin

@@ -16,7 +16,7 @@ go install github.com/corverroos/gssh
 # If `which gssh` fails, then fix your environment: `export PATH=$PATH:$(go env GOPATH)/bin`. Or see https://go.dev/doc/gopath_code
 
 # Setup ssh user via GSSH_USER env var:
-echo "GSSH_USER=bar" >> ~/.bashrc
+echo "export GSSH_USER=bar" >> ~/.bashrc
 ```
 
 ## Usage

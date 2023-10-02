@@ -42,8 +42,8 @@ gssh -u=""
 gssh -p ls -la
 
 # SSH to VM named 'foo-bar' and execute the commands 'ls -la' and 'pwd' and 'printenv':
-gssh -h foo-bar -- \
+gssh -h foo-bar -- "\
   ls -ls && \
   pwd && \
-  printenv
+  printenv"
 ``````

@@ -24,6 +24,7 @@ var (
 	flagFilter = flag.String("f", "", "regex filter VMs by name")
 	flagHost   = flag.String("h", "", "specific VM host name (alias for -f '^host$')")
 	flagPrev   = flag.Bool("p", false, "use previously selected VM (if any) as filter")
+	flagFwd    = flag.String("L", "", "configures SSH port forwarding. Equivalent to 'ssh -L <value>'")
 )
 
 func main() {
@@ -49,7 +50,7 @@ func main() {
 		user = *flagUser
 	}
 
-	err := run(*flagHost, *flagFilter, user, *flagPrev, flag.Args())
+	err := run(*flagHost, *flagFilter, user, *flagPrev, *flagFwd, flag.Args())
 	if err != nil {
 		fmt.Fprintf(o, "Fatal error: %v", err)
 		os.Exit(1)
@@ -57,7 +58,7 @@ func main() {
 }
 
 // run executes the gssh command.
-func run(hostname string, filter string, user string, usePrev bool, args []string) error {
+func run(hostname string, filter string, user string, usePrev bool, flagFwd string, args []string) error {
 	if hostname != "" && filter != "" {
 		return fmt.Errorf("cannot use both -h and -f flags")
 	} else if hostname != "" {
@@ -74,7 +75,7 @@ func run(hostname string, filter string, user string, usePrev bool, args []strin
 		return err
 	}
 
-	fmt.Printf("Using: project=%q, user=%q, filter=%q, prev=%v len(args)=%d\n", project, user, filter, usePrev, len(args))
+	fmt.Printf("Using: project=%q, user=%q, filter=%q, prev=%v, portfwd=%v, len(args)=%d\n", project, user, filter, usePrev, flagFwd, len(args))
 
 	var prev instance
 	if conf, err := loadConfig(); err == nil {
@@ -134,7 +135,11 @@ func run(hostname string, filter string, user string, usePrev bool, args []strin
 		host = user + "@" + host
 	}
 
-	cmds := []string{"gcloud", "compute", "ssh", fmt.Sprintf("--zone=%s", zone), host}
+	cmds := []string{"gcloud", "compute", "ssh", fmt.Sprintf("--zone=%s", zone)}
+	if len(flagFwd) > 0 {
+		cmds = append(cmds, fmt.Sprintf("--ssh-flag=-L %s", flagFwd))
+	}
+	cmds = append(cmds, host)
 	if len(args) > 0 {
 		cmds = append(cmds, "--", strings.Join(args, " "))
 	}

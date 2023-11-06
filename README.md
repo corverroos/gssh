@@ -46,4 +46,7 @@ gssh -h foo-bar -- "\
   ls -ls && \
   pwd && \
   printenv"
-``````
+
+# Setup port-forwarding from localhost:1234 to localhost:5678 on VM named 'foo-bar'  
+gssh -h foo-bar -L 1234:localhost:5678
+```
